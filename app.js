@@ -4,6 +4,7 @@ let sb = null;
 let allCategories = [];
 let allRows = [];
 let activeCategory = "all";
+let activeBrand = "all";
 let activeWaitlistSlug = "";
 let priceChartInstance = null;
 
@@ -55,10 +56,65 @@ function groupByProduct(rows) {
   return Array.from(map.values());
 }
 
+function ensureFilterControls() {
+  const searchRow = document.querySelector(".search-row");
+  const sortSelect = document.getElementById("sortSelect");
+
+  if (!document.getElementById("brandSelect") && searchRow) {
+    const brandSelect = document.createElement("select");
+    brandSelect.id = "brandSelect";
+    brandSelect.setAttribute("aria-label", "Filter by brand");
+    brandSelect.innerHTML = `<option value="all">All Brands</option>`;
+    brandSelect.addEventListener("change", () => {
+      activeBrand = brandSelect.value;
+      renderProducts();
+    });
+    searchRow.insertBefore(brandSelect, sortSelect);
+  }
+
+  if (sortSelect && !sortSelect.querySelector('option[value="savings-desc"]')) {
+    const opt = document.createElement("option");
+    opt.value = "savings-desc";
+    opt.textContent = "Biggest Savings (CAD)";
+    sortSelect.appendChild(opt);
+  }
+}
+
+function populateBrandDropdown() {
+  const brandSelect = document.getElementById("brandSelect");
+  if (!brandSelect) return;
+
+  const products = groupByProduct(allRows).filter(
+    (p) => activeCategory === "all" || p.category_slug === activeCategory
+  );
+  const brands = Array.from(new Set(products.map((p) => p.brand))).sort((a, b) =>
+    a.localeCompare(b)
+  );
+
+  if (activeBrand !== "all" && !brands.includes(activeBrand)) {
+    activeBrand = "all";
+  }
+
+  brandSelect.innerHTML =
+    `<option value="all">All Brands (${brands.length})</option>` +
+    brands
+      .map(
+        (b) =>
+          `<option value="${b}" ${activeBrand === b ? "selected" : ""}>${b}</option>`
+      )
+      .join("");
+}
+
 function renderTabs() {
   const nav = document.getElementById("categoryTabs");
+  const grouped = groupByProduct(allRows);
+  const counts = {};
+  for (const p of grouped) {
+    counts[p.category_slug] = (counts[p.category_slug] || 0) + 1;
+  }
+
   const buttons = [
-    `<button class="tab-btn ${activeCategory === "all" ? "active" : ""}" data-slug="all">All Active Categories</button>`,
+    `<button class="tab-btn ${activeCategory === "all" ? "active" : ""}" data-slug="all">All Active Categories (${grouped.length})</button>`,
   ];
   for (const cat of allCategories) {
     if (cat.is_coming_soon) {
@@ -66,8 +122,9 @@ function renderTabs() {
         `<button class="tab-btn" data-soon="${cat.slug}" data-title="${cat.name_en}">${cat.name_en}<span class="soon-badge">Soon</span></button>`
       );
     } else {
+      const cnt = counts[cat.slug] || 0;
       buttons.push(
-        `<button class="tab-btn ${activeCategory === cat.slug ? "active" : ""}" data-slug="${cat.slug}">${cat.name_en}</button>`
+        `<button class="tab-btn ${activeCategory === cat.slug ? "active" : ""}" data-slug="${cat.slug}">${cat.name_en} (${cnt})</button>`
       );
     }
   }
@@ -76,7 +133,9 @@ function renderTabs() {
   nav.querySelectorAll("[data-slug]").forEach((btn) => {
     btn.addEventListener("click", () => {
       activeCategory = btn.dataset.slug;
+      activeBrand = "all";
       renderTabs();
+      populateBrandDropdown();
       renderProducts();
     });
   });
@@ -98,11 +157,12 @@ function renderProducts() {
 
   let products = groupByProduct(allRows).filter((p) => {
     const matchCat = activeCategory === "all" || p.category_slug === activeCategory;
+    const matchBrand = activeBrand === "all" || p.brand === activeBrand;
     const matchQ =
       !query ||
       p.brand.toLowerCase().includes(query) ||
       p.name.toLowerCase().includes(query);
-    return matchCat && matchQ;
+    return matchCat && matchBrand && matchQ;
   });
 
   if (sort === "price-asc") {
@@ -113,10 +173,16 @@ function renderProducts() {
         Number(a.best.unit_price_per_100_cad ?? 999999) -
         Number(b.best.unit_price_per_100_cad ?? 999999)
     );
+  } else if (sort === "savings-desc") {
+    products.sort((a, b) => b.savings - a.savings);
   }
 
   if (!products.length) {
-    grid.innerHTML = `<p class="subtitle">No matching products found.</p>`;
+    grid.innerHTML = `
+      <div class="card">
+        <p class="subtitle" style="margin:0 0 10px;">No matching products found.</p>
+        <button class="btn-primary" onclick="resetFilters()">Clear Filters</button>
+      </div>`;
     return;
   }
 
@@ -156,12 +222,21 @@ function renderProducts() {
     .join("");
 }
 
+window.resetFilters = function () {
+  activeCategory = "all";
+  activeBrand = "all";
+  document.getElementById("searchInput").value = "";
+  document.getElementById("sortSelect").value = "featured";
+  renderTabs();
+  populateBrandDropdown();
+  renderProducts();
+};
+
 window.openProductModal = async function (productId) {
   const products = groupByProduct(allRows);
   const product = products.find((p) => p.product_id === productId);
   if (!product) return;
 
-  // Update URL so users can copy & share direct product links
   const url = new URL(window.location);
   url.searchParams.set("product", product.slug);
   window.history.replaceState({}, "", url);
@@ -200,7 +275,6 @@ window.openProductModal = async function (productId) {
     )
     .join("");
 
-  // Render Similar Products in the same category
   const similar = products
     .filter((p) => p.category_slug === product.category_slug && p.product_id !== product.product_id)
     .slice(0, 3);
@@ -305,10 +379,11 @@ async function init() {
 
     allCategories = catRes.data || [];
     allRows = prodRes.data || [];
+    ensureFilterControls();
     renderTabs();
+    populateBrandDropdown();
     renderProducts();
 
-    // Open product directly if ?product=slug is in URL
     const targetSlug = new URLSearchParams(window.location.search).get("product");
     if (targetSlug) {
       const match = groupByProduct(allRows).find((p) => p.slug === targetSlug);
