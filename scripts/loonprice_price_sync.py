@@ -2,13 +2,8 @@
 LoonPrice.com - Adım 4 (%80): Otomatik Fiyat & Stok Tarama Motoru
 ==================================================================
 Supabase'deki aktif ürün listelemelerini (product_listings) okur,
-6 Kanada mağazasından (Amazon.ca, Sephora, Shoppers, Well.ca,
-Walmart.ca, Best Buy Canada) güncel CAD fiyatını ve stok durumunu
-JSON-LD / mağaza şemaları üzerinden çeker ve Supabase'i günceller.
-
-Gerekli Ortam Değişkenleri (GitHub Secrets veya .env):
-  SUPABASE_URL=https://xxxx.supabase.co
-  SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOi...
+6 Kanada mağazasından güncel CAD fiyatını ve stok durumunu çeker
+ve Supabase'i günceller.
 """
 
 import json
@@ -21,8 +16,14 @@ from typing import Any, Optional
 import requests
 from bs4 import BeautifulSoup
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+raw_url = os.environ.get("SUPABASE_URL", "").strip().strip('"').strip("'").rstrip("/")
+if raw_url.endswith("/rest/v1"):
+    raw_url = raw_url[:-8]
+if raw_url and not raw_url.startswith(("http://", "https://")):
+    raw_url = f"https://{raw_url}"
+
+SUPABASE_URL = raw_url.rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip().strip('"').strip("'")
 
 HEADERS = {
     "User-Agent": (
@@ -36,12 +37,14 @@ HEADERS = {
 
 
 def supabase_headers() -> dict[str, str]:
-    return {
+    headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
     }
+    if not SUPABASE_KEY.startswith("sb_"):
+        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
+    return headers
 
 
 def fetch_active_listings() -> list[dict[str, Any]]:
@@ -189,7 +192,7 @@ def run_sync() -> None:
         else:
             print("  [Atlandı] Fiyat bilgisi okunamadı (bot koruması veya sayfa yapısı).")
 
-        time.sleep(1.5)  # Mağaza sunucularını yormamak için nazik bekleme
+        time.sleep(1.5)
 
 
 if __name__ == "__main__":
