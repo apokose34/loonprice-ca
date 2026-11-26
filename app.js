@@ -29,6 +29,7 @@ function groupByProduct(rows) {
         name: row.product_name,
         size_value: row.size_value,
         size_unit: row.size_unit,
+        image_url: row.image_url,
         category_slug: row.category_slug,
         category_name: row.category_name,
         listings: [],
@@ -114,9 +115,13 @@ function renderProducts() {
       const unitPill = p.best.unit_price_per_100_cad
         ? `<div class="unit-pill">$${Number(p.best.unit_price_per_100_cad).toFixed(2)} CAD / 100 ${p.size_unit}</div>`
         : "";
+      const imgHtml = p.image_url
+        ? `<img src="${p.image_url}" alt="${p.brand} ${p.name}" loading="lazy" onerror="this.style.display='none'" style="width:100%;height:170px;object-fit:contain;margin-bottom:10px;border-radius:8px;background:#fff;" />`
+        : "";
       return `
       <article class="card">
         <div>
+          ${imgHtml}
           <div class="card-brand">${p.brand}</div>
           <h2 class="card-title">${p.name}</h2>
           <div class="card-meta">${p.category_name} • ${sizeLabel} • ${p.listings.length} Canadian store(s)</div>
