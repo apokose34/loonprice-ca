@@ -5,6 +5,9 @@ on:
     - cron: "0 12 * * 0"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   discover:
     runs-on: ubuntu-latest
@@ -14,8 +17,17 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests beautifulsoup4
-      - name: Run Catalog Discovery
+      - name: Run Catalog Discovery & Sitemap
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python scripts/loonprice_catalog_discovery.py
+        run: |
+          python scripts/loonprice_catalog_discovery.py
+          python scripts/generate_sitemap.py
+      - name: Commit updated sitemap
+        run: |
+          git config user.name "LoonPrice Bot"
+          git config user.email "bot@loonprice.com"
+          git add sitemap.xml
+          git diff --staged --quiet || git commit -m "Update sitemap.xml"
+          git push
