@@ -49,6 +49,8 @@ function groupByProduct(rows) {
   for (const p of map.values()) {
     p.listings.sort((a, b) => Number(a.total_price_cad) - Number(b.total_price_cad));
     p.best = p.listings[0];
+    p.highest = p.listings[p.listings.length - 1];
+    p.savings = Math.max(0, Number(p.highest.total_price_cad) - Number(p.best.total_price_cad));
   }
   return Array.from(map.values());
 }
@@ -122,8 +124,12 @@ function renderProducts() {
     .map((p) => {
       const sizeLabel = p.size_unit === "unit" ? "1 Unit" : `${p.size_value} ${p.size_unit}`;
       const unitPill = p.best.unit_price_per_100_cad
-        ? `<div class="unit-pill">$${Number(p.best.unit_price_per_100_cad).toFixed(2)} CAD / 100 ${p.size_unit}</div>`
+        ? `<span class="unit-pill">$${Number(p.best.unit_price_per_100_cad).toFixed(2)} CAD / 100 ${p.size_unit}</span>`
         : "";
+      const savingsBadge =
+        p.savings >= 1
+          ? `<span style="display:inline-block;margin-top:6px;margin-left:6px;font-size:12px;font-weight:700;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;">Save $${p.savings.toFixed(2)} CAD</span>`
+          : "";
       const imgHtml = p.image_url
         ? `<img src="${p.image_url}" alt="${p.brand} ${p.name}" loading="lazy" onerror="this.style.display='none'" style="width:100%;height:170px;object-fit:contain;margin-bottom:10px;border-radius:8px;background:#fff;" />`
         : "";
@@ -139,7 +145,7 @@ function renderProducts() {
           <div class="price-box">
             <div class="best-price">$${Number(p.best.total_price_cad).toFixed(2)} CAD</div>
             <div class="best-store">Best at <strong>${p.best.store_name}</strong></div>
-            ${unitPill}
+            <div>${unitPill}${savingsBadge}</div>
           </div>
           <button class="btn-primary" style="width:100%;margin-top:10px;" onclick="openProductModal('${p.product_id}')">
             Compare Stores &amp; History
@@ -155,17 +161,35 @@ window.openProductModal = async function (productId) {
   const product = products.find((p) => p.product_id === productId);
   if (!product) return;
 
+  // Update URL so users can copy & share direct product links
+  const url = new URL(window.location);
+  url.searchParams.set("product", product.slug);
+  window.history.replaceState({}, "", url);
+
   document.getElementById("modalHeader").innerHTML = `
-    <div class="card-brand">${product.brand}</div>
-    <h2 style="margin:4px 0 6px;">${product.name}</h2>
-    <p class="subtitle">All prices in CAD • Ships from Canada</p>
+    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+      ${
+        product.image_url
+          ? `<img src="${product.image_url}" alt="${product.name}" onerror="this.style.display='none'" style="width:84px;height:84px;object-fit:contain;border-radius:8px;border:1px solid #e2e8f0;background:#fff;padding:4px;" />`
+          : ""
+      }
+      <div>
+        <div class="card-brand">${product.brand}</div>
+        <h2 style="margin:4px 0 4px;">${product.name}</h2>
+        <p class="subtitle" style="margin:0;">All prices in CAD • Ships from Canada • ${
+          product.savings >= 1
+            ? `<strong>Save up to $${product.savings.toFixed(2)} CAD</strong> by comparing`
+            : "Verified Canadian retailers"
+        }</p>
+      </div>
+    </div>
   `;
 
   document.getElementById("modalTableBody").innerHTML = product.listings
     .map(
-      (l) => `
+      (l, idx) => `
       <tr>
-        <td><strong>${l.store_name}</strong></td>
+        <td><strong>${l.store_name}</strong> ${idx === 0 ? '<span style="font-size:11px;background:#dcfce7;color:#15803d;padding:2px 6px;border-radius:6px;font-weight:700;">Best</span>' : ""}</td>
         <td>$${Number(l.current_price_cad).toFixed(2)} CAD</td>
         <td>${Number(l.shipping_cost_cad) === 0 ? "Free" : `$${Number(l.shipping_cost_cad).toFixed(2)} CAD`}</td>
         <td><strong>$${Number(l.total_price_cad).toFixed(2)} CAD</strong></td>
@@ -175,6 +199,39 @@ window.openProductModal = async function (productId) {
       </tr>`
     )
     .join("");
+
+  // Render Similar Products in the same category
+  const similar = products
+    .filter((p) => p.category_slug === product.category_slug && p.product_id !== product.product_id)
+    .slice(0, 3);
+
+  let similarContainer = document.getElementById("similarProductsSection");
+  if (!similarContainer) {
+    similarContainer = document.createElement("div");
+    similarContainer.id = "similarProductsSection";
+    document.querySelector("#productModal .modal-body").appendChild(similarContainer);
+  }
+
+  if (similar.length) {
+    similarContainer.innerHTML = `
+      <h3 style="margin-top:24px;">Similar Products in ${product.category_name}</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;">
+        ${similar
+          .map(
+            (s) => `
+          <div onclick="openProductModal('${s.product_id}')" style="cursor:pointer;border:1px solid #e2e8f0;border-radius:10px;padding:12px;background:#f8fafc;">
+            <div style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;">${s.brand}</div>
+            <div style="font-size:14px;font-weight:700;margin:4px 0;">${s.name}</div>
+            <div style="font-size:15px;font-weight:800;color:#15803d;">$${Number(s.best.total_price_cad).toFixed(2)} CAD</div>
+            <div style="font-size:12px;color:#475569;">at ${s.best.store_name}</div>
+          </div>`
+          )
+          .join("")}
+      </div>
+    `;
+  } else {
+    similarContainer.innerHTML = "";
+  }
 
   document.getElementById("productModal").classList.remove("hidden");
 
@@ -223,6 +280,13 @@ window.openProductModal = async function (productId) {
   });
 };
 
+function closeProductModal() {
+  document.getElementById("productModal").classList.add("hidden");
+  const url = new URL(window.location);
+  url.searchParams.delete("product");
+  window.history.replaceState({}, "", url);
+}
+
 async function init() {
   try {
     if (!SUPABASE_URL || SUPABASE_URL.includes("YOUR_PROJECT_ID")) {
@@ -243,6 +307,13 @@ async function init() {
     allRows = prodRes.data || [];
     renderTabs();
     renderProducts();
+
+    // Open product directly if ?product=slug is in URL
+    const targetSlug = new URLSearchParams(window.location.search).get("product");
+    if (targetSlug) {
+      const match = groupByProduct(allRows).find((p) => p.slug === targetSlug);
+      if (match) window.openProductModal(match.product_id);
+    }
   } catch (err) {
     document.getElementById("productGrid").innerHTML = `
       <div class="card">
@@ -254,9 +325,7 @@ async function init() {
 
 document.getElementById("searchInput").addEventListener("input", renderProducts);
 document.getElementById("sortSelect").addEventListener("change", renderProducts);
-document.getElementById("closeModal").addEventListener("click", () => {
-  document.getElementById("productModal").classList.add("hidden");
-});
+document.getElementById("closeModal").addEventListener("click", closeProductModal);
 document.getElementById("closeWaitlist").addEventListener("click", () => {
   document.getElementById("waitlistModal").classList.add("hidden");
 });
