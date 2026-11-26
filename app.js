@@ -1,20 +1,21 @@
 const { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } = window.LOONPRICE_CONFIG;
 
-const headers = {
-  apikey: SUPABASE_PUBLISHABLE_KEY,
-  Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
-};
-
+let sb = null;
 let allCategories = [];
 let allRows = [];
 let activeCategory = "all";
 let activeWaitlistSlug = "";
 let priceChartInstance = null;
 
-async function fetchJSON(path) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers });
-  if (!res.ok) throw new Error(`Supabase error: ${res.status}`);
-  return res.json();
+function loadSupabaseSDK() {
+  return new Promise((resolve, reject) => {
+    if (window.supabase) return resolve(window.supabase);
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
+    s.onload = () => resolve(window.supabase);
+    s.onerror = () => reject(new Error("Failed to load Supabase SDK"));
+    document.head.appendChild(s);
+  });
 }
 
 function groupByProduct(rows) {
@@ -164,20 +165,22 @@ window.openProductModal = async function (productId) {
   document.getElementById("productModal").classList.remove("hidden");
 
   const bestListingId = product.best.listing_id;
-  const history = await fetchJSON(
-    `price_history?listing_id=eq.${bestListingId}&order=recorded_at.asc`
-  );
+  const { data: history } = await sb
+    .from("price_history")
+    .select("*")
+    .eq("listing_id", bestListingId)
+    .order("recorded_at", { ascending: true });
 
   const ctx = document.getElementById("priceChart").getContext("2d");
   if (priceChartInstance) priceChartInstance.destroy();
   priceChartInstance = new Chart(ctx, {
     type: "line",
     data: {
-      labels: history.map((h) => new Date(h.recorded_at).toLocaleDateString("en-CA")),
+      labels: (history || []).map((h) => new Date(h.recorded_at).toLocaleDateString("en-CA")),
       datasets: [
         {
           label: `${product.best.store_name} (CAD)`,
-          data: history.map((h) => Number(h.price_cad)),
+          data: (history || []).map((h) => Number(h.price_cad)),
           borderColor: "#d9232e",
           backgroundColor: "rgba(217, 35, 46, 0.12)",
           fill: true,
@@ -191,17 +194,29 @@ window.openProductModal = async function (productId) {
 
 async function init() {
   try {
-    [allCategories, allRows] = await Promise.all([
-      fetchJSON("categories?order=sort_order.asc"),
-      fetchJSON("v_product_comparison?select=*"),
+    if (!SUPABASE_URL || SUPABASE_URL.includes("YOUR_PROJECT_ID")) {
+      throw new Error("Update config.js with your Supabase Project URL and Publishable Key.");
+    }
+    const { createClient } = await loadSupabaseSDK();
+    sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+
+    const [catRes, prodRes] = await Promise.all([
+      sb.from("categories").select("*").order("sort_order", { ascending: true }),
+      sb.from("v_product_comparison").select("*"),
     ]);
+
+    if (catRes.error) throw catRes.error;
+    if (prodRes.error) throw prodRes.error;
+
+    allCategories = catRes.data || [];
+    allRows = prodRes.data || [];
     renderTabs();
     renderProducts();
   } catch (err) {
     document.getElementById("productGrid").innerHTML = `
       <div class="card">
-        <h3>Connect Your Supabase Keys</h3>
-        <p class="subtitle">Update <code>config.js</code> with your Supabase Project URL and Publishable Key to load live Canadian products.</p>
+        <h3>Connection Notice</h3>
+        <p class="subtitle">${err.message || "Unable to load products from Supabase."}</p>
       </div>`;
   }
 }
@@ -219,12 +234,10 @@ document.getElementById("waitlistForm").addEventListener("submit", async (e) => 
   const email = document.getElementById("waitlistEmail").value.trim();
   const msg = document.getElementById("waitlistMsg");
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/category_waitlist`, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json", Prefer: "return=minimal" },
-      body: JSON.stringify({ category_slug: activeWaitlistSlug, email }),
-    });
-    msg.textContent = res.ok
+    const { error } = await sb
+      .from("category_waitlist")
+      .insert({ category_slug: activeWaitlistSlug, email });
+    msg.textContent = !error
       ? "Thanks! You are on the Canadian launch waitlist."
       : "You are already subscribed or an error occurred.";
     document.getElementById("waitlistEmail").value = "";
