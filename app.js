@@ -7,6 +7,15 @@ let activeCategory = "all";
 let activeWaitlistSlug = "";
 let priceChartInstance = null;
 
+const STORE_COLORS = {
+  "Amazon.ca": "#d9232e",
+  "Walmart Canada": "#0071ce",
+  "Well.ca": "#16a34a",
+  "Shoppers Drug Mart": "#9333ea",
+  "Sephora Canada": "#0f172a",
+  "Best Buy Canada": "#eab308",
+};
+
 function loadSupabaseSDK() {
   return new Promise((resolve, reject) => {
     if (window.supabase) return resolve(window.supabase);
@@ -169,29 +178,46 @@ window.openProductModal = async function (productId) {
 
   document.getElementById("productModal").classList.remove("hidden");
 
-  const bestListingId = product.best.listing_id;
+  const listingIds = product.listings.map((l) => l.listing_id);
   const { data: history } = await sb
     .from("price_history")
     .select("*")
-    .eq("listing_id", bestListingId)
+    .in("listing_id", listingIds)
     .order("recorded_at", { ascending: true });
+
+  const allDates = Array.from(
+    new Set((history || []).map((h) => new Date(h.recorded_at).toLocaleDateString("en-CA")))
+  );
+
+  const datasets = product.listings
+    .map((l) => {
+      const storeHistory = (history || []).filter((h) => h.listing_id === l.listing_id);
+      if (!storeHistory.length) return null;
+      const byDate = new Map(
+        storeHistory.map((h) => [
+          new Date(h.recorded_at).toLocaleDateString("en-CA"),
+          Number(h.price_cad),
+        ])
+      );
+      const color = STORE_COLORS[l.store_name] || "#64748b";
+      return {
+        label: `${l.store_name} (CAD)`,
+        data: allDates.map((d) => byDate.get(d) ?? null),
+        borderColor: color,
+        backgroundColor: `${color}22`,
+        spanGaps: true,
+        tension: 0.25,
+      };
+    })
+    .filter(Boolean);
 
   const ctx = document.getElementById("priceChart").getContext("2d");
   if (priceChartInstance) priceChartInstance.destroy();
   priceChartInstance = new Chart(ctx, {
     type: "line",
     data: {
-      labels: (history || []).map((h) => new Date(h.recorded_at).toLocaleDateString("en-CA")),
-      datasets: [
-        {
-          label: `${product.best.store_name} (CAD)`,
-          data: (history || []).map((h) => Number(h.price_cad)),
-          borderColor: "#d9232e",
-          backgroundColor: "rgba(217, 35, 46, 0.12)",
-          fill: true,
-          tension: 0.25,
-        },
-      ],
+      labels: allDates,
+      datasets,
     },
     options: { responsive: true, maintainAspectRatio: false },
   });
