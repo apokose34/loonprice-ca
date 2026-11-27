@@ -1,10 +1,9 @@
 """
-LoonPrice.com - Tam Doğrulamalı Fiyat, Stok ve Gramaj Senkronizasyon Motoru (v2)
+LoonPrice.com - Tam Doğrulamalı Fiyat, Stok ve Gramaj Senkronizasyon Motoru (v3)
 ================================================================================
-- Best Buy Canada (JSON API) ve Well.ca (JSON-LD) üzerinden canlı CAD fiyatını,
-  stok durumunu ve ürün başlığındaki gerçek mL/g boyutunu okur.
-- Eski/yanlış girilmiş fiyat veya gramaj varsa canlı veriye göre otomatik düzeltir.
-- Fiyat değiştiğinde price_history tablosuna gerçek günlük kayıt ekler.
+- Best Buy Canada: Resmi JSON API üzerinden canlı CAD fiyat + stok.
+- Well.ca: Önce hızlı JSON-LD dener, engellenirse gerçek Chromium tarayıcısı
+  (Playwright) ile sayfayı açıp canlı CAD fiyat, stok ve mL/g gramajını doğrular.
 """
 
 import json
@@ -85,16 +84,13 @@ def extract_size_from_text(text: str) -> tuple[Optional[float], Optional[str]]:
     return None, None
 
 
-def scrape_well_ca(url: str) -> tuple[Optional[float], bool, Optional[float], Optional[str]]:
-    resp = requests.get(url, headers=HEADERS, timeout=20)
-    if resp.status_code != 200:
-        return None, True, None, None
-
-    soup = BeautifulSoup(resp.text, "html.parser")
+def extract_well_ca_from_html(html: str) -> tuple[Optional[float], bool, Optional[float], Optional[str]]:
+    soup = BeautifulSoup(html, "html.parser")
     price = None
-    in_stock = True
+    in_stock = "notify me - sold out" not in soup.get_text(" ").lower()
     detected_size, detected_unit = None, None
 
+    # 1) JSON-LD kontrolü
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string or "{}")
@@ -107,7 +103,6 @@ def scrape_well_ca(url: str) -> tuple[Optional[float], bool, Optional[float], Op
             name_str = str(node.get("name", ""))
             if name_str and detected_size is None:
                 detected_size, detected_unit = extract_size_from_text(name_str)
-
             offers = node.get("offers")
             if not offers:
                 continue
@@ -115,20 +110,38 @@ def scrape_well_ca(url: str) -> tuple[Optional[float], bool, Optional[float], Op
             for offer in offer_list:
                 if not isinstance(offer, dict):
                     continue
-                currency = str(offer.get("priceCurrency", "CAD")).upper()
-                if currency not in ("CAD", ""):
-                    continue
                 p = parse_price_value(offer.get("price") or offer.get("lowPrice"))
-                availability = str(offer.get("availability", "")).lower()
                 if p is not None:
                     price = p
-                    in_stock = "outofstock" not in availability
+                    avail = str(offer.get("availability", "")).lower()
+                    if "outofstock" in avail:
+                        in_stock = False
+                    break
+
+    # 2) Meta / HTML fiyat seçicileri
+    if price is None:
+        meta_price = soup.find("meta", property="product:price:amount") or soup.find(
+            "meta", attrs={"itemprop": "price"}
+        )
+        if meta_price and meta_price.get("content"):
+            price = parse_price_value(meta_price["content"])
+
+    if price is None:
+        for sel in (".product_price", ".price", "[itemprop='price']", ".sale_price"):
+            el = soup.select_one(sel)
+            if el:
+                p = parse_price_value(el.get_text(" "))
+                if p is not None and p < 500:
+                    price = p
                     break
 
     if detected_size is None:
-        title_el = soup.find("h1") or soup.find("title")
-        if title_el:
-            detected_size, detected_unit = extract_size_from_text(title_el.get_text(" "))
+        for sel in (".product_size", "h1", "title"):
+            el = soup.select_one(sel)
+            if el:
+                detected_size, detected_unit = extract_size_from_text(el.get_text(" "))
+                if detected_size is not None:
+                    break
 
     return price, in_stock, detected_size, detected_unit
 
@@ -146,35 +159,6 @@ def scrape_bestbuy_ca(url: str) -> tuple[Optional[float], bool, Optional[float],
     price = parse_price_value(data.get("salePrice") or data.get("regularPrice"))
     in_stock = bool(data.get("isAvailableOnline", True))
     return price, in_stock, None, None
-
-
-def scrape_generic_jsonld(url: str) -> tuple[Optional[float], bool, Optional[float], Optional[str]]:
-    resp = requests.get(url, headers=HEADERS, timeout=20)
-    if resp.status_code != 200:
-        return None, True, None, None
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string or "{}")
-        except json.JSONDecodeError:
-            continue
-        nodes = data if isinstance(data, list) else [data]
-        for node in nodes:
-            if not isinstance(node, dict) or not node.get("offers"):
-                continue
-            offers = node["offers"]
-            offer_list = offers if isinstance(offers, list) else [offers]
-            for offer in offer_list:
-                if not isinstance(offer, dict):
-                    continue
-                currency = str(offer.get("priceCurrency", "CAD")).upper()
-                if currency not in ("CAD", ""):
-                    continue
-                price = parse_price_value(offer.get("price") or offer.get("lowPrice"))
-                availability = str(offer.get("availability", "")).lower()
-                if price is not None:
-                    return price, ("outofstock" not in availability), None, None
-    return None, True, None, None
 
 
 def update_product_size_if_needed(
@@ -239,34 +223,63 @@ def run_sync() -> None:
     ok_count = 0
     skip_count = 0
 
-    for item in listings:
-        store = item.get("stores") or {}
-        store_slug = store.get("slug", "unknown")
-        product_info = item.get("products") or {}
-        url = item["product_url"]
-        print(f"- [{store_slug}] {product_info.get('name', '')} -> {url}")
+    # Playwright tarayıcısını yalnızca Well.ca kayıtları için bir kez başlat
+    pw_context = None
+    browser = None
+    page = None
+    try:
+        from playwright.sync_api import sync_playwright
 
-        try:
-            if store_slug == "best-buy-ca":
-                new_price, in_stock, det_size, det_unit = scrape_bestbuy_ca(url)
-            elif store_slug == "well-ca":
-                new_price, in_stock, det_size, det_unit = scrape_well_ca(url)
+        pw_context = sync_playwright().start()
+        browser = pw_context.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=HEADERS["User-Agent"],
+            locale="en-CA",
+        )
+        page = context.new_page()
+    except Exception as exc:
+        print(f"[Bilgi] Playwright başlatılamadı, sadece requests kullanılacak: {exc}")
+
+    try:
+        for item in listings:
+            store = item.get("stores") or {}
+            store_slug = store.get("slug", "unknown")
+            product_info = item.get("products") or {}
+            url = item["product_url"]
+            print(f"- [{store_slug}] {product_info.get('name', '')} -> {url}")
+
+            new_price, in_stock, det_size, det_unit = None, True, None, None
+
+            try:
+                if store_slug == "best-buy-ca":
+                    new_price, in_stock, det_size, det_unit = scrape_bestbuy_ca(url)
+                elif store_slug == "well-ca":
+                    resp = requests.get(url, headers=HEADERS, timeout=15)
+                    if resp.status_code == 200:
+                        new_price, in_stock, det_size, det_unit = extract_well_ca_from_html(resp.text)
+                    if new_price is None and page is not None:
+                        page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                        page.wait_for_timeout(1500)
+                        new_price, in_stock, det_size, det_unit = extract_well_ca_from_html(
+                            page.content()
+                        )
+            except Exception as exc:
+                print(f"  [Hata] {exc}")
+
+            if new_price is not None:
+                update_product_size_if_needed(item["product_id"], product_info, det_size, det_unit)
+                update_listing_and_history(item, new_price, in_stock)
+                ok_count += 1
             else:
-                new_price, in_stock, det_size, det_unit = scrape_generic_jsonld(url)
-        except requests.RequestException as exc:
-            print(f"  [Hata] Bağlantı hatası: {exc}")
-            skip_count += 1
-            continue
+                print("  [Doğrulanamadı / Bot Koruması]")
+                skip_count += 1
 
-        if new_price is not None:
-            update_product_size_if_needed(item["product_id"], product_info, det_size, det_unit)
-            update_listing_and_history(item, new_price, in_stock)
-            ok_count += 1
-        else:
-            print("  [Doğrulanamadı / Bot Koruması]")
-            skip_count += 1
-
-        time.sleep(0.8)
+            time.sleep(0.5)
+    finally:
+        if browser:
+            browser.close()
+        if pw_context:
+            pw_context.stop()
 
     print(f"\nÖZET: {ok_count} kayıt canlı doğrulandı, {skip_count} kayıt doğrulanamadı.")
 
