@@ -30,6 +30,14 @@ function loadSupabaseSDK() {
   });
 }
 
+window.logStoreClick = function (productId, slug, storeName) {
+  if (!sb) return;
+  sb.from("click_logs")
+    .insert({ product_id: productId, product_slug: slug, store_name: storeName })
+    .then(() => {})
+    .catch(() => {});
+};
+
 function groupByProduct(rows) {
   const map = new Map();
   for (const row of rows) {
@@ -102,7 +110,6 @@ function ensureFilterControls() {
     sortSelect.appendChild(opt);
   }
 
-  // Top Deals Strip Container
   const grid = document.getElementById("productGrid");
   if (!document.getElementById("topDealsStrip") && grid) {
     const strip = document.createElement("section");
@@ -111,7 +118,6 @@ function ensureFilterControls() {
     grid.parentNode.insertBefore(strip, grid);
   }
 
-  // Affiliate-Ready Info Modal & Footer Links
   const footer = document.querySelector("footer .container");
   if (footer && !document.getElementById("footerLinks")) {
     footer.innerHTML = `
@@ -413,7 +419,7 @@ window.openProductModal = async function (productId) {
         <td><strong>$${Number(l.total_price_cad).toFixed(2)} CAD</strong></td>
         <td>${l.unit_price_per_100_cad ? `$${Number(l.unit_price_per_100_cad).toFixed(2)}` : "—"}</td>
         <td>${l.in_stock ? "In Stock" : "Out of Stock"}</td>
-        <td><a class="btn-primary" href="${l.target_url}" target="_blank" rel="noopener noreferrer">Visit Store</a></td>
+        <td><a class="btn-primary" href="${l.target_url}" target="_blank" rel="noopener noreferrer" onclick="logStoreClick('${product.product_id}','${product.slug}','${l.store_name}')">Visit Store</a></td>
       </tr>`
     )
     .join("");
