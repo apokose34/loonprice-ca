@@ -3,8 +3,10 @@ const { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } = window.LOONPRICE_CONFIG;
 let sb = null;
 let allCategories = [];
 let allRows = [];
+let minPriceByListing = new Map();
 let activeCategory = "all";
 let activeBrand = "all";
+let activeStore = "all";
 let activeWaitlistSlug = "";
 let priceChartInstance = null;
 
@@ -52,6 +54,15 @@ function groupByProduct(rows) {
     p.best = p.listings[0];
     p.highest = p.listings[p.listings.length - 1];
     p.savings = Math.max(0, Number(p.highest.total_price_cad) - Number(p.best.total_price_cad));
+    const histMin = minPriceByListing.get(p.best.listing_id);
+    p.isNinetyDayLow =
+      histMin !== undefined && Number(p.best.current_price_cad) <= histMin + 0.01;
+    p.updatedLabel = p.best.last_checked_at
+      ? new Date(p.best.last_checked_at).toLocaleDateString("en-CA", {
+          month: "short",
+          day: "numeric",
+        })
+      : "Today";
   }
   return Array.from(map.values());
 }
@@ -72,37 +83,163 @@ function ensureFilterControls() {
     searchRow.insertBefore(brandSelect, sortSelect);
   }
 
+  if (!document.getElementById("storeSelect") && searchRow) {
+    const storeSelect = document.createElement("select");
+    storeSelect.id = "storeSelect";
+    storeSelect.setAttribute("aria-label", "Filter by retailer");
+    storeSelect.innerHTML = `<option value="all">All Retailers</option>`;
+    storeSelect.addEventListener("change", () => {
+      activeStore = storeSelect.value;
+      renderProducts();
+    });
+    searchRow.insertBefore(storeSelect, sortSelect);
+  }
+
   if (sortSelect && !sortSelect.querySelector('option[value="savings-desc"]')) {
     const opt = document.createElement("option");
     opt.value = "savings-desc";
     opt.textContent = "Biggest Savings (CAD)";
     sortSelect.appendChild(opt);
   }
+
+  // Top Deals Strip Container
+  const grid = document.getElementById("productGrid");
+  if (!document.getElementById("topDealsStrip") && grid) {
+    const strip = document.createElement("section");
+    strip.id = "topDealsStrip";
+    strip.style.marginBottom = "24px";
+    grid.parentNode.insertBefore(strip, grid);
+  }
+
+  // Affiliate-Ready Info Modal & Footer Links
+  const footer = document.querySelector("footer .container");
+  if (footer && !document.getElementById("footerLinks")) {
+    footer.innerHTML = `
+      <div id="footerLinks" style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;">
+        <span>LoonPrice • Independent Canadian Price Tracker • Prices shown in CAD</span>
+        <div style="display:flex;gap:16px;">
+          <a href="#" onclick="openInfoModal('about');return false;" style="color:#475569;text-decoration:none;font-weight:600;">About</a>
+          <a href="#" onclick="openInfoModal('how');return false;" style="color:#475569;text-decoration:none;font-weight:600;">How It Works</a>
+          <a href="#" onclick="openInfoModal('privacy');return false;" style="color:#475569;text-decoration:none;font-weight:600;">Privacy &amp; Terms</a>
+        </div>
+      </div>
+    `;
+  }
+
+  if (!document.getElementById("infoModal")) {
+    const modal = document.createElement("div");
+    modal.id = "infoModal";
+    modal.className = "modal hidden";
+    modal.innerHTML = `
+      <div class="modal-card modal-small">
+        <button class="modal-close" aria-label="Close" onclick="document.getElementById('infoModal').classList.add('hidden')">&times;</button>
+        <h2 id="infoModalTitle" style="margin-top:0;"></h2>
+        <div id="infoModalBody" class="subtitle" style="line-height:1.6;"></div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  }
 }
 
-function populateBrandDropdown() {
+window.openInfoModal = function (type) {
+  const title = document.getElementById("infoModalTitle");
+  const body = document.getElementById("infoModalBody");
+  if (type === "about") {
+    title.textContent = "About LoonPrice";
+    body.innerHTML =
+      "LoonPrice is an independent Canadian price comparison platform built to help shoppers in Canada compare real-time CAD prices, unit prices (per 100 mL / 100 g), and 365-day price history across trusted Canadian retailers without customs or USD surprises.";
+  } else if (type === "how") {
+    title.textContent = "How LoonPrice Works";
+    body.innerHTML =
+      "Our automated tracker monitors verified Canadian retailers daily (Amazon.ca, Sephora Canada, Shoppers Drug Mart, Well.ca, Walmart Canada, and Best Buy Canada). Rankings are strictly sorted by lowest total CAD price—completely unbiased and transparent.";
+  } else {
+    title.textContent = "Privacy & Terms";
+    body.innerHTML =
+      "LoonPrice does not sell personal data or require user accounts to browse prices. Emails submitted to Coming Soon waitlists are used solely to notify you when new Canadian categories launch. Prices and stock are verified daily from public retailer listings.";
+  }
+  document.getElementById("infoModal").classList.remove("hidden");
+};
+
+function populateFilterDropdowns() {
   const brandSelect = document.getElementById("brandSelect");
-  if (!brandSelect) return;
+  const storeSelect = document.getElementById("storeSelect");
 
   const products = groupByProduct(allRows).filter(
     (p) => activeCategory === "all" || p.category_slug === activeCategory
   );
-  const brands = Array.from(new Set(products.map((p) => p.brand))).sort((a, b) =>
-    a.localeCompare(b)
-  );
 
-  if (activeBrand !== "all" && !brands.includes(activeBrand)) {
-    activeBrand = "all";
+  if (brandSelect) {
+    const brands = Array.from(new Set(products.map((p) => p.brand))).sort((a, b) =>
+      a.localeCompare(b)
+    );
+    if (activeBrand !== "all" && !brands.includes(activeBrand)) activeBrand = "all";
+    brandSelect.innerHTML =
+      `<option value="all">All Brands (${brands.length})</option>` +
+      brands
+        .map(
+          (b) =>
+            `<option value="${b}" ${activeBrand === b ? "selected" : ""}>${b}</option>`
+        )
+        .join("");
   }
 
-  brandSelect.innerHTML =
-    `<option value="all">All Brands (${brands.length})</option>` +
-    brands
-      .map(
-        (b) =>
-          `<option value="${b}" ${activeBrand === b ? "selected" : ""}>${b}</option>`
-      )
-      .join("");
+  if (storeSelect) {
+    const stores = Array.from(new Set(allRows.map((r) => r.store_name))).sort((a, b) =>
+      a.localeCompare(b)
+    );
+    if (activeStore !== "all" && !stores.includes(activeStore)) activeStore = "all";
+    storeSelect.innerHTML =
+      `<option value="all">All Retailers (${stores.length})</option>` +
+      stores
+        .map(
+          (s) =>
+            `<option value="${s}" ${activeStore === s ? "selected" : ""}>${s}</option>`
+        )
+        .join("");
+  }
+}
+
+function renderTopDeals() {
+  const strip = document.getElementById("topDealsStrip");
+  if (!strip) return;
+
+  const topDeals = groupByProduct(allRows)
+    .filter((p) => p.savings >= 2)
+    .sort((a, b) => b.savings - a.savings)
+    .slice(0, 3);
+
+  if (!topDeals.length) {
+    strip.innerHTML = "";
+    return;
+  }
+
+  strip.innerHTML = `
+    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+        <strong style="font-size:15px;">🍁 Today's Top Canadian Savings</strong>
+        <span style="font-size:12px;color:#475569;">Biggest verified CAD price gaps across stores</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;">
+        ${topDeals
+          .map(
+            (d) => `
+          <div onclick="openProductModal('${d.product_id}')" style="cursor:pointer;display:flex;align-items:center;gap:12px;padding:10px;border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;">
+            ${
+              d.image_url
+                ? `<img src="${d.image_url}" alt="${d.name}" onerror="this.style.display='none'" style="width:48px;height:48px;object-fit:contain;background:#fff;border-radius:6px;padding:2px;" />`
+                : ""
+            }
+            <div style="min-width:0;">
+              <div style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;">${d.brand}</div>
+              <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${d.name}</div>
+              <div style="font-size:13px;font-weight:800;color:#15803d;">$${Number(d.best.total_price_cad).toFixed(2)} CAD <span style="background:#dcfce7;padding:1px 6px;border-radius:4px;font-size:11px;">Save $${d.savings.toFixed(2)}</span></div>
+            </div>
+          </div>`
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
 }
 
 function renderTabs() {
@@ -135,7 +272,7 @@ function renderTabs() {
       activeCategory = btn.dataset.slug;
       activeBrand = "all";
       renderTabs();
-      populateBrandDropdown();
+      populateFilterDropdowns();
       renderProducts();
     });
   });
@@ -158,11 +295,13 @@ function renderProducts() {
   let products = groupByProduct(allRows).filter((p) => {
     const matchCat = activeCategory === "all" || p.category_slug === activeCategory;
     const matchBrand = activeBrand === "all" || p.brand === activeBrand;
+    const matchStore =
+      activeStore === "all" || p.listings.some((l) => l.store_name === activeStore);
     const matchQ =
       !query ||
       p.brand.toLowerCase().includes(query) ||
       p.name.toLowerCase().includes(query);
-    return matchCat && matchBrand && matchQ;
+    return matchCat && matchBrand && matchStore && matchQ;
   });
 
   if (sort === "price-asc") {
@@ -196,6 +335,9 @@ function renderProducts() {
         p.savings >= 1
           ? `<span style="display:inline-block;margin-top:6px;margin-left:6px;font-size:12px;font-weight:700;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;">Save $${p.savings.toFixed(2)} CAD</span>`
           : "";
+      const lowBadge = p.isNinetyDayLow
+        ? `<span style="display:inline-block;margin-top:6px;margin-left:6px;font-size:11px;font-weight:700;background:#fef3c7;color:#92400e;padding:2px 7px;border-radius:6px;">90-Day Low</span>`
+        : "";
       const imgHtml = p.image_url
         ? `<img src="${p.image_url}" alt="${p.brand} ${p.name}" loading="lazy" onerror="this.style.display='none'" style="width:100%;height:170px;object-fit:contain;margin-bottom:10px;border-radius:8px;background:#fff;" />`
         : "";
@@ -205,13 +347,13 @@ function renderProducts() {
           ${imgHtml}
           <div class="card-brand">${p.brand}</div>
           <h2 class="card-title">${p.name}</h2>
-          <div class="card-meta">${p.category_name} • ${sizeLabel} • ${p.listings.length} Canadian store(s)</div>
+          <div class="card-meta">${p.category_name} • ${sizeLabel} • ${p.listings.length} store(s) • Updated ${p.updatedLabel}</div>
         </div>
         <div>
           <div class="price-box">
             <div class="best-price">$${Number(p.best.total_price_cad).toFixed(2)} CAD</div>
             <div class="best-store">Best at <strong>${p.best.store_name}</strong></div>
-            <div>${unitPill}${savingsBadge}</div>
+            <div>${unitPill}${savingsBadge}${lowBadge}</div>
           </div>
           <button class="btn-primary" style="width:100%;margin-top:10px;" onclick="openProductModal('${p.product_id}')">
             Compare Stores &amp; History
@@ -225,10 +367,11 @@ function renderProducts() {
 window.resetFilters = function () {
   activeCategory = "all";
   activeBrand = "all";
+  activeStore = "all";
   document.getElementById("searchInput").value = "";
   document.getElementById("sortSelect").value = "featured";
   renderTabs();
-  populateBrandDropdown();
+  populateFilterDropdowns();
   renderProducts();
 };
 
@@ -369,19 +512,30 @@ async function init() {
     const { createClient } = await loadSupabaseSDK();
     sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
-    const [catRes, prodRes] = await Promise.all([
+    const [catRes, prodRes, histRes] = await Promise.all([
       sb.from("categories").select("*").order("sort_order", { ascending: true }),
       sb.from("v_product_comparison").select("*"),
+      sb.from("price_history").select("listing_id,price_cad"),
     ]);
 
     if (catRes.error) throw catRes.error;
     if (prodRes.error) throw prodRes.error;
 
+    minPriceByListing = new Map();
+    for (const h of histRes.data || []) {
+      const val = Number(h.price_cad);
+      const prev = minPriceByListing.get(h.listing_id);
+      if (prev === undefined || val < prev) {
+        minPriceByListing.set(h.listing_id, val);
+      }
+    }
+
     allCategories = catRes.data || [];
     allRows = prodRes.data || [];
     ensureFilterControls();
+    renderTopDeals();
     renderTabs();
-    populateBrandDropdown();
+    populateFilterDropdowns();
     renderProducts();
 
     const targetSlug = new URLSearchParams(window.location.search).get("product");
